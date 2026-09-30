@@ -8,10 +8,12 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.view.Surface
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 import kotlin.random.Random
 
 class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventListener {
@@ -27,6 +29,12 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private val gyro: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+
+    private val rotSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+    private val rotMatrix = FloatArray(9)
+    private val remapped = FloatArray(9)
+    private val orientation = FloatArray(3)
+    private var heading = 0f   // degrees clockwise from north, 0..360
 
     private var thread: Thread? = null
     @Volatile private var running = false
@@ -46,10 +54,21 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
     private val crossPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(80, 255, 140); style = Paint.Style.STROKE; strokeWidth = 4f }
     private val flashPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.YELLOW }
+    private val compassBg = Paint().apply { color = Color.argb(140, 0, 0, 0) }
+    private val tickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; strokeWidth = 3f }
+    private val northPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(255, 80, 80); textSize = 40f; textAlign = Paint.Align.CENTER
+        isFakeBoldText = true }
+    private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 40f; textAlign = Paint.Align.CENTER }
+    private val pointerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(80, 255, 140); strokeWidth = 5f }
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 48f }
 
     fun resume() {
         gyro?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        rotSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
         running = true
         thread = Thread(this).also { it.start() }
     }
@@ -66,6 +85,10 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
 
     override fun onSensorChanged(e: SensorEvent) {
         if (e.timestamp == 0L) return
+        if (e.sensor.type == Sensor.TYPE_ROTATION_VECTOR) {
+            updateHeading(e.values)
+            return
+        }
         val dt = 1f / 60f
         synchronized(lock) {
             // Landscape: device X axis = screen vertical, device Y axis = screen horizontal
@@ -75,6 +98,26 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
             cy = cy.coerceIn(0f, height.toFloat())
         }
     }
+
+    @Suppress("DEPRECATION")
+    private fun updateHeading(values: FloatArray) {
+        SensorManager.getRotationMatrixFromVector(rotMatrix, values)
+        val (axisX, axisY) = when (display?.rotation ?: windowManagerRotation()) {
+            Surface.ROTATION_90 -> SensorManager.AXIS_Y to SensorManager.AXIS_MINUS_X
+            Surface.ROTATION_180 -> SensorManager.AXIS_MINUS_X to SensorManager.AXIS_MINUS_Y
+            Surface.ROTATION_270 -> SensorManager.AXIS_MINUS_Y to SensorManager.AXIS_X
+            else -> SensorManager.AXIS_X to SensorManager.AXIS_Y
+        }
+        SensorManager.remapCoordinateSystem(rotMatrix, axisX, axisY, remapped)
+        SensorManager.getOrientation(remapped, orientation)
+        val deg = Math.toDegrees(orientation[0].toDouble()).toFloat()
+        synchronized(lock) { heading = (deg + 360f) % 360f }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun windowManagerRotation(): Int =
+        (context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager)
+            .defaultDisplay.rotation
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
@@ -129,8 +172,40 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         flashes.removeAll { f -> f.t <= 0f }
     }
 
+    private fun drawCompass(c: Canvas) {
+        val w = width.toFloat()
+        val stripW = w * 0.5f
+        val left = (w - stripW) / 2f
+        val pxPerDeg = stripW / 120f   // 120 degrees visible
+        c.drawRect(left, 10f, left + stripW, 100f, compassBg)
+        val first = ((heading - 60f) / 15f).toInt() * 15 - 15
+        var d = first
+        while (d <= heading + 75f) {
+            val x = w / 2f + (d - heading) * pxPerDeg
+            if (x >= left && x <= left + stripW) {
+                val deg = ((d % 360) + 360) % 360
+                val name = when (deg) {
+                    0 -> "N"; 90 -> "E"; 180 -> "S"; 270 -> "W"; else -> null
+                }
+                if (name != null) {
+                    c.drawText(name, x, 60f, if (deg == 0) northPaint else labelPaint)
+                } else if (deg % 45 == 0) {
+                    c.drawText(deg.toString(), x, 60f, labelPaint.apply { textSize = 28f })
+                    labelPaint.textSize = 40f
+                } else {
+                    c.drawLine(x, 40f, x, 60f, tickPaint)
+                }
+                c.drawLine(x, 70f, x, 90f, tickPaint)
+            }
+            d += 15
+        }
+        c.drawLine(w / 2f, 10f, w / 2f, 100f, pointerPaint)
+        c.drawText("${heading.roundToInt() % 360}\u00B0", w / 2f, 140f, labelPaint)
+    }
+
     private fun render(c: Canvas) {
         c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bg)
+        if (rotSensor != null) drawCompass(c)
         for (t in targets) {
             val rr = t.r * (0.5f + 0.5f * (t.life / 3.5f))
             c.drawCircle(t.x, t.y, rr, targetPaint)
