@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -35,6 +36,11 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
 
     @Suppress("DEPRECATION")
     private val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+
+    private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+    private var vibrationOn = prefs.getBoolean("vibration", true)
+    private val vibButton = RectF()
+    private var touchOnButton = false
 
     private val rotSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
     private val rotMatrix = FloatArray(9)
@@ -70,6 +76,10 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         color = Color.WHITE; textSize = 40f; textAlign = Paint.Align.CENTER }
     private val pointerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(80, 255, 140); strokeWidth = 5f }
+    private val buttonOn = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(40, 140, 80) }
+    private val buttonOff = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(90, 90, 100) }
+    private val buttonText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 34f; textAlign = Paint.Align.CENTER }
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 48f }
 
     fun resume() {
@@ -86,7 +96,10 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
     }
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-        synchronized(lock) { cx = w / 2f; cy = h / 2f }
+        synchronized(lock) {
+            cx = w / 2f; cy = h / 2f
+            vibButton.set(w - 250f, 20f, w - 20f, 100f)
+        }
     }
 
     override fun onSensorChanged(e: SensorEvent) {
@@ -130,22 +143,34 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
     override fun onTouchEvent(e: MotionEvent): Boolean {
         synchronized(lock) {
             when (e.action) {
-                MotionEvent.ACTION_DOWN -> { lastTouchX = e.x; lastTouchY = e.y; moved = false }
-                MotionEvent.ACTION_MOVE -> if (gyro == null) {
+                MotionEvent.ACTION_DOWN -> {
+                    lastTouchX = e.x; lastTouchY = e.y; moved = false
+                    touchOnButton = vibButton.contains(e.x, e.y)
+                }
+                MotionEvent.ACTION_MOVE -> if (gyro == null && !touchOnButton) {
                     // Fallback aiming by dragging when no gyroscope
                     cx = (cx + e.x - lastTouchX).coerceIn(0f, width.toFloat())
                     cy = (cy + e.y - lastTouchY).coerceIn(0f, height.toFloat())
                     if (hypot(e.x - lastTouchX, e.y - lastTouchY) > 4) moved = true
                     lastTouchX = e.x; lastTouchY = e.y
                 }
-                MotionEvent.ACTION_UP -> if (gameOver) restart() else if (!moved) shoot()
+                MotionEvent.ACTION_UP -> if (touchOnButton) {
+                    if (vibButton.contains(e.x, e.y)) toggleVibration()
+                } else if (gameOver) restart() else if (!moved) shoot()
             }
         }
         return true
     }
 
+    private fun toggleVibration() {
+        vibrationOn = !vibrationOn
+        prefs.edit().putBoolean("vibration", vibrationOn).apply()
+        vibrate(30)
+    }
+
     @Suppress("DEPRECATION")
     private fun vibrate(ms: Long) {
+        if (!vibrationOn) return
         val v = vibrator ?: return
         if (!v.hasVibrator()) return
         if (Build.VERSION.SDK_INT >= 26) {
@@ -236,6 +261,9 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         c.drawLine(cx - 55, cy, cx + 55, cy, crossPaint)
         c.drawLine(cx, cy - 55, cx, cy + 55, crossPaint)
         c.drawText("Score: $score   Lives: $lives", 30f, 70f, text)
+        c.drawRoundRect(vibButton, 20f, 20f, if (vibrationOn) buttonOn else buttonOff)
+        c.drawText(if (vibrationOn) "Vibro: ON" else "Vibro: OFF",
+            vibButton.centerX(), vibButton.centerY() + 12f, buttonText)
         if (gyro == null) c.drawText("No gyroscope: drag to aim, tap to shoot", 30f, 130f, text)
         if (gameOver) {
             c.drawText("GAME OVER  -  Score $score", width / 2f - 300f, height / 2f, text)
