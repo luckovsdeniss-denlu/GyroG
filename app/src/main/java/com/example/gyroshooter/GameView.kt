@@ -9,9 +9,12 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.media.AudioAttributes
 import android.os.Build
+import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.os.VibratorManager
 import android.view.Surface
 import android.view.MotionEvent
 import android.view.SurfaceHolder
@@ -35,7 +38,11 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
     private val gyro: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
 
     @Suppress("DEPRECATION")
-    private val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+    private val vibrator: Vibrator? =
+        if (Build.VERSION.SDK_INT >= 31)
+            (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
+        else
+            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
 
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private var vibrationOn = prefs.getBoolean("vibration", true)
@@ -165,7 +172,7 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
     private fun toggleVibration() {
         vibrationOn = !vibrationOn
         prefs.edit().putBoolean("vibration", vibrationOn).apply()
-        vibrate(30)
+        vibrate(80)
     }
 
     @Suppress("DEPRECATION")
@@ -173,8 +180,14 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         if (!vibrationOn) return
         val v = vibrator ?: return
         if (!v.hasVibrator()) return
-        if (Build.VERSION.SDK_INT >= 26) {
-            v.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
+        // Full amplitude: short pulses at default strength are barely felt on many phones
+        val amp = if (v.hasAmplitudeControl()) 255 else VibrationEffect.DEFAULT_AMPLITUDE
+        if (Build.VERSION.SDK_INT >= 33) {
+            v.vibrate(VibrationEffect.createOneShot(ms, amp),
+                VibrationAttributes.createForUsage(VibrationAttributes.USAGE_MEDIA))
+        } else if (Build.VERSION.SDK_INT >= 26) {
+            v.vibrate(VibrationEffect.createOneShot(ms, amp),
+                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).build())
         } else {
             v.vibrate(ms)
         }
@@ -183,7 +196,7 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
     private fun shoot() {
         flashes += Flash(cx, cy, 0.15f)
         val hit = targets.firstOrNull { hypot(it.x - cx, it.y - cy) <= it.r }
-        if (hit != null) { targets.remove(hit); score++; vibrate(40) } else vibrate(15)
+        if (hit != null) { targets.remove(hit); score++; vibrate(80) } else vibrate(40)
     }
 
     private fun restart() {
