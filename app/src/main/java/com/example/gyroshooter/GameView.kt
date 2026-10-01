@@ -1,6 +1,8 @@
 package com.example.gyroshooter
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -9,8 +11,13 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.media.AudioAttributes
 import android.os.Build
+import android.os.Bundle
+import android.os.Looper
 import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -23,7 +30,8 @@ import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
-class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventListener {
+class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventListener,
+    LocationListener {
 
     // Flip these to -1f if aiming feels reversed on your phone
     private val invertX = 1f
@@ -48,6 +56,11 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
     private var vibrationOn = prefs.getBoolean("vibration", true)
     private val vibButton = RectF()
     private var touchOnButton = false
+
+    private val locationManager =
+        context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+    private var location: Location? = null
+    private var locationActive = false
 
     private val rotSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
     private val rotMatrix = FloatArray(9)
@@ -87,16 +100,61 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
     private val buttonOff = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(90, 90, 100) }
     private val buttonText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE; textSize = 34f; textAlign = Paint.Align.CENTER }
+    private val gpsText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(140, 200, 255); textSize = 36f }
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 48f }
 
     fun resume() {
         gyro?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         rotSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        startLocation()
         running = true
         thread = Thread(this).also { it.start() }
     }
 
+    private fun hasLocationPermission() = Build.VERSION.SDK_INT < 23 ||
+        context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED ||
+        context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+
+    @Suppress("MissingPermission")
+    fun startLocation() {
+        val lm = locationManager ?: return
+        if (locationActive || !hasLocationPermission()) return
+        for (provider in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
+            if (!lm.allProviders.contains(provider)) continue
+            try {
+                lm.requestLocationUpdates(provider, 1000L, 0f, this, Looper.getMainLooper())
+                lm.getLastKnownLocation(provider)?.let { onLocationChanged(it) }
+            } catch (e: SecurityException) { return }
+        }
+        locationActive = true
+    }
+
+    private fun stopLocation() {
+        locationManager?.removeUpdates(this)
+        locationActive = false
+    }
+
+    override fun onLocationChanged(loc: Location) {
+        synchronized(lock) {
+            val cur = location
+            // Prefer GPS fixes; accept network fixes only when no recent GPS fix
+            if (cur == null || loc.provider == LocationManager.GPS_PROVIDER ||
+                cur.provider != LocationManager.GPS_PROVIDER ||
+                loc.time - cur.time > 10_000) location = loc
+        }
+    }
+
+    // Overridden so older Android versions (which call these) don't crash
+    @Deprecated("Deprecated in Java")
+    override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+    override fun onProviderEnabled(provider: String) {}
+    override fun onProviderDisabled(provider: String) {}
+
     fun pause() {
+        stopLocation()
         sensorManager.unregisterListener(this)
         running = false
         thread?.join()
@@ -261,6 +319,19 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         c.drawText("${heading.roundToInt() % 360}\u00B0", w / 2f, 140f, labelPaint)
     }
 
+    private fun drawGps(c: Canvas) {
+        val loc = location
+        val msg = when {
+            locationManager == null -> "GPS: not available"
+            !hasLocationPermission() -> "GPS: no permission"
+            loc == null -> "GPS: searching..."
+            else -> String.format(java.util.Locale.US, "GPS: %.5f, %.5f  \u00B1%dm",
+                loc.latitude, loc.longitude, loc.accuracy.roundToInt()) +
+                (if (loc.hasSpeed()) "  ${(loc.speed * 3.6f).roundToInt()} km/h" else "")
+        }
+        c.drawText(msg, 30f, height - 30f, gpsText)
+    }
+
     private fun render(c: Canvas) {
         c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bg)
         if (rotSensor != null) drawCompass(c)
@@ -277,6 +348,7 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         c.drawRoundRect(vibButton, 20f, 20f, if (vibrationOn) buttonOn else buttonOff)
         c.drawText(if (vibrationOn) "Vibro: ON" else "Vibro: OFF",
             vibButton.centerX(), vibButton.centerY() + 12f, buttonText)
+        drawGps(c)
         if (gyro == null) c.drawText("No gyroscope: drag to aim, tap to shoot", 30f, 130f, text)
         if (gameOver) {
             c.drawText("GAME OVER  -  Score $score", width / 2f - 300f, height / 2f, text)
