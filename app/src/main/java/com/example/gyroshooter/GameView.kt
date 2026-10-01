@@ -8,6 +8,9 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.view.Surface
 import android.view.MotionEvent
 import android.view.SurfaceHolder
@@ -29,6 +32,9 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private val gyro: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+
+    @Suppress("DEPRECATION")
+    private val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
 
     private val rotSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
     private val rotMatrix = FloatArray(9)
@@ -138,10 +144,21 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         return true
     }
 
+    @Suppress("DEPRECATION")
+    private fun vibrate(ms: Long) {
+        val v = vibrator ?: return
+        if (!v.hasVibrator()) return
+        if (Build.VERSION.SDK_INT >= 26) {
+            v.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
+        } else {
+            v.vibrate(ms)
+        }
+    }
+
     private fun shoot() {
         flashes += Flash(cx, cy, 0.15f)
         val hit = targets.firstOrNull { hypot(it.x - cx, it.y - cy) <= it.r }
-        if (hit != null) { targets.remove(hit); score++ }
+        if (hit != null) { targets.remove(hit); score++; vibrate(40) } else vibrate(15)
     }
 
     private fun restart() {
@@ -166,7 +183,10 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
             t.x += t.vx * dt; t.y += t.vy * dt; t.life -= dt
             if (t.x < t.r || t.x > width - t.r) t.vx = -t.vx
             if (t.y < t.r || t.y > height - t.r) t.vy = -t.vy
-            if (t.life <= 0f) { it.remove(); lives--; if (lives <= 0) gameOver = true }
+            if (t.life <= 0f) {
+                it.remove(); lives--
+                if (lives <= 0) { gameOver = true; vibrate(500) } else vibrate(150)
+            }
         }
         flashes.forEach { f -> f.t -= dt }
         flashes.removeAll { f -> f.t <= 0f }
