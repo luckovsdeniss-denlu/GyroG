@@ -27,6 +27,7 @@ import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import kotlin.math.hypot
+import kotlin.math.sqrt
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
@@ -61,6 +62,11 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
     private var location: Location? = null
     private var locationActive = false
+
+    private val magSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+    private val mag = FloatArray(3)          // µT, smoothed
+    private var magStrength = 0f
+    private var magAccuracy = SensorManager.SENSOR_STATUS_UNRELIABLE
 
     private val rotSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
     private val rotMatrix = FloatArray(9)
@@ -100,6 +106,10 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
     private val buttonOff = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(90, 90, 100) }
     private val buttonText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE; textSize = 34f; textAlign = Paint.Align.CENTER }
+    private val magText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(255, 200, 90); textSize = 36f; textAlign = Paint.Align.RIGHT }
+    private val magBarBg = Paint().apply { color = Color.argb(140, 255, 255, 255) }
+    private val magBarFg = Paint().apply { color = Color.rgb(255, 200, 90) }
     private val gpsText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(140, 200, 255); textSize = 36f }
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 48f }
@@ -107,6 +117,7 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
     fun resume() {
         gyro?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         rotSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        magSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
         startLocation()
         running = true
         thread = Thread(this).also { it.start() }
@@ -169,6 +180,14 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
 
     override fun onSensorChanged(e: SensorEvent) {
         if (e.timestamp == 0L) return
+        if (e.sensor.type == Sensor.TYPE_MAGNETIC_FIELD) {
+            synchronized(lock) {
+                for (i in 0..2) mag[i] += (e.values[i] - mag[i]) * 0.2f   // low-pass filter
+                magStrength = sqrt(mag[0] * mag[0] + mag[1] * mag[1] + mag[2] * mag[2])
+                magAccuracy = e.accuracy
+            }
+            return
+        }
         if (e.sensor.type == Sensor.TYPE_ROTATION_VECTOR) {
             updateHeading(e.values)
             return
@@ -203,7 +222,9 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         (context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager)
             .defaultDisplay.rotation
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        if (sensor?.type == Sensor.TYPE_MAGNETIC_FIELD) synchronized(lock) { magAccuracy = accuracy }
+    }
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
         synchronized(lock) {
@@ -319,6 +340,21 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         c.drawText("${heading.roundToInt() % 360}\u00B0", w / 2f, 140f, labelPaint)
     }
 
+    private fun drawMagnetometer(c: Canvas) {
+        val right = width - 30f
+        val bottom = height - 30f
+        // Earth's field is ~25-65 µT; bar is full at 100 µT (magnets/metal push it higher)
+        val barW = 300f
+        val fill = (magStrength / 100f).coerceIn(0f, 1f) * barW
+        c.drawRect(right - barW, bottom - 14f, right, bottom, magBarBg)
+        c.drawRect(right - barW, bottom - 14f, right - barW + fill, bottom, magBarFg)
+        c.drawText("MAG: ${magStrength.roundToInt()} \u00B5T", right, bottom - 30f, magText)
+        c.drawText("x ${mag[0].roundToInt()}  y ${mag[1].roundToInt()}  z ${mag[2].roundToInt()}",
+            right, bottom - 75f, magText)
+        if (magAccuracy <= SensorManager.SENSOR_STATUS_ACCURACY_LOW)
+            c.drawText("Calibrate: move phone in a figure 8", right, bottom - 120f, magText)
+    }
+
     private fun drawGps(c: Canvas) {
         val loc = location
         val msg = when {
@@ -349,6 +385,7 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         c.drawText(if (vibrationOn) "Vibro: ON" else "Vibro: OFF",
             vibButton.centerX(), vibButton.centerY() + 12f, buttonText)
         drawGps(c)
+        if (magSensor != null) drawMagnetometer(c)
         if (gyro == null) c.drawText("No gyroscope: drag to aim, tap to shoot", 30f, 130f, text)
         if (gameOver) {
             c.drawText("GAME OVER  -  Score $score", width / 2f - 300f, height / 2f, text)
