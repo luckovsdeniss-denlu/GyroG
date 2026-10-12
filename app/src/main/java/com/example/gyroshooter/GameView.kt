@@ -15,6 +15,8 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
@@ -57,6 +59,9 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
     private var vibrationOn = prefs.getBoolean("vibration", true)
     private val vibButton = RectF()
     private var touchOnButton = false
+    private var soundOn = prefs.getBoolean("sound", true)
+    private val soundButton = RectF()
+    private var tones: ToneGenerator? = null
 
     private val locationManager =
         context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
@@ -119,6 +124,9 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         rotSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
         magSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
         startLocation()
+        if (tones == null) tones = try {
+            ToneGenerator(AudioManager.STREAM_MUSIC, 80)
+        } catch (e: RuntimeException) { null }
         running = true
         thread = Thread(this).also { it.start() }
     }
@@ -166,6 +174,7 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
 
     fun pause() {
         stopLocation()
+        tones?.release(); tones = null
         sensorManager.unregisterListener(this)
         running = false
         thread?.join()
@@ -175,6 +184,7 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         synchronized(lock) {
             cx = w / 2f; cy = h / 2f
             vibButton.set(w - 250f, 20f, w - 20f, 100f)
+            soundButton.set(w - 250f, 115f, w - 20f, 195f)
         }
     }
 
@@ -231,7 +241,7 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
                     lastTouchX = e.x; lastTouchY = e.y; moved = false
-                    touchOnButton = vibButton.contains(e.x, e.y)
+                    touchOnButton = vibButton.contains(e.x, e.y) || soundButton.contains(e.x, e.y)
                 }
                 MotionEvent.ACTION_MOVE -> if (gyro == null && !touchOnButton) {
                     // Fallback aiming by dragging when no gyroscope
@@ -242,6 +252,7 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
                 }
                 MotionEvent.ACTION_UP -> if (touchOnButton) {
                     if (vibButton.contains(e.x, e.y)) toggleVibration()
+                    else if (soundButton.contains(e.x, e.y)) toggleSound()
                 } else if (gameOver) restart() else if (!moved) shoot()
             }
         }
@@ -252,6 +263,17 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         vibrationOn = !vibrationOn
         prefs.edit().putBoolean("vibration", vibrationOn).apply()
         vibrate(80)
+    }
+
+    private fun toggleSound() {
+        soundOn = !soundOn
+        prefs.edit().putBoolean("sound", soundOn).apply()
+        tone(ToneGenerator.TONE_PROP_BEEP, 80)
+    }
+
+    private fun tone(type: Int, ms: Int) {
+        if (!soundOn) return
+        try { tones?.startTone(type, ms) } catch (e: RuntimeException) {}
     }
 
     @Suppress("DEPRECATION")
@@ -275,7 +297,8 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
     private fun shoot() {
         flashes += Flash(cx, cy, 0.15f)
         val hit = targets.firstOrNull { hypot(it.x - cx, it.y - cy) <= it.r }
-        if (hit != null) { targets.remove(hit); score++; vibrate(80) } else vibrate(40)
+        if (hit != null) { targets.remove(hit); score++; vibrate(80); tone(ToneGenerator.TONE_PROP_ACK, 120) }
+        else { vibrate(40); tone(ToneGenerator.TONE_PROP_BEEP, 50) }
     }
 
     private fun restart() {
@@ -302,7 +325,8 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
             if (t.y < t.r || t.y > height - t.r) t.vy = -t.vy
             if (t.life <= 0f) {
                 it.remove(); lives--
-                if (lives <= 0) { gameOver = true; vibrate(500) } else vibrate(150)
+                if (lives <= 0) { gameOver = true; vibrate(500); tone(ToneGenerator.TONE_SUP_ERROR, 600) }
+                else { vibrate(150); tone(ToneGenerator.TONE_PROP_NACK, 200) }
             }
         }
         flashes.forEach { f -> f.t -= dt }
@@ -384,6 +408,9 @@ class GameView(context: Context) : SurfaceView(context), Runnable, SensorEventLi
         c.drawRoundRect(vibButton, 20f, 20f, if (vibrationOn) buttonOn else buttonOff)
         c.drawText(if (vibrationOn) "Vibro: ON" else "Vibro: OFF",
             vibButton.centerX(), vibButton.centerY() + 12f, buttonText)
+        c.drawRoundRect(soundButton, 20f, 20f, if (soundOn) buttonOn else buttonOff)
+        c.drawText(if (soundOn) "Sound: ON" else "Sound: OFF",
+            soundButton.centerX(), soundButton.centerY() + 12f, buttonText)
         drawGps(c)
         if (magSensor != null) drawMagnetometer(c)
         if (gyro == null) c.drawText("No gyroscope: drag to aim, tap to shoot", 30f, 130f, text)
